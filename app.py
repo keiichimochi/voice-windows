@@ -6,8 +6,6 @@ import time
 import threading
 import os
 from dotenv import load_dotenv
-import easyocr
-import numpy as np
 import google.generativeai as genai
 import requests
 import json
@@ -21,7 +19,8 @@ load_dotenv()
 # Gemini APIの設定
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
+vision_model = genai.GenerativeModel('gemini-pro-vision')
+text_model = genai.GenerativeModel('gemini-pro')
 
 # Aivis Speech APIの設定
 AIVIS_API_URL = os.getenv('AIVIS_API_URL', 'http://localhost:10101')
@@ -35,12 +34,10 @@ app = Flask(__name__)
 # 画面サイズを取得
 screen_width, screen_height = pyautogui.size()
 
-# EasyOCRの初期化（初回の読み込みに時間がかかるので、起動時に初期化）
-reader = easyocr.Reader(['ja', 'en'])
-
 # 最新のスクリーンショットを保持する変数
 latest_screenshot = None
 latest_text = ""
+
 screenshot_lock = threading.Lock()
 text_lock = threading.Lock()
 
@@ -170,7 +167,7 @@ def extract_japanese_sentences(text):
 テキスト:
 {text}
 """
-        response = model.generate_content(prompt)
+        response = text_model.generate_content(prompt)
         text = response.text.strip()
         print(f"[DEBUG] 抽出された日本語文章: {text}")
         
@@ -194,35 +191,43 @@ def extract_text_from_image(image):
     try:
         print("[DEBUG] 画像からテキスト抽出開始")
         
-        # PIL ImageをNumPy配列に変換
-        image_np = np.array(image)
-        print("[DEBUG] 画像をNumPy配列に変換完了")
+        # PIL Imageをバイトストリームにエンコード
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format='PNG')
+        img_byte_arr = img_byte_arr.getvalue()
         
-        # EasyOCRで日本語と英語のテキストを抽出
-        print("[DEBUG] EasyOCRでテキスト抽出中...")
-        results = reader.readtext(image_np)
-        print(f"[DEBUG] EasyOCR抽出結果: {len(results)}件")
+        # Gemini Vision APIにプロンプトを送信
+        prompt = """
+この画像から日本語のテキストを抽出してください。
+以下の条件で抽出してください：
+1. 日本語の文章のみを抽出
+2. 単語や記号のみは除外
+3. 英語の文章は除外
+4. 抽出したテキストは改行で区切って出力
+5. レイアウトや装飾的な情報は除外
+6. できるだけ自然な日本語の文章として出力
+"""
         
-        # 日本語文字列のみを抽出
-        japanese_texts = []
-        for result in results:
-            text = result[1]
-            # 日本語が含まれているかチェック（ひらがな、カタカナ、漢字のいずれかを含む）
-            if any(ord(char) in range(0x3040, 0x30FF) or ord(char) in range(0x4E00, 0x9FFF) for char in text):
-                japanese_texts.append(text)
-        print(f"[DEBUG] 日本語テキスト抽出結果: {len(japanese_texts)}件")
+        # 画像をbase64エンコード
+        image_parts = [
+            {
+                "mime_type": "image/png",
+                "data": base64.b64encode(img_byte_arr).decode('utf-8')
+            }
+        ]
         
-        # 抽出された日本語テキストを結合
-        raw_text = '\n'.join(japanese_texts)
-        print(f"[DEBUG] 抽出された生テキスト: {raw_text}")
+        # Vision APIを呼び出し
+        response = vision_model.generate_content([prompt, image_parts])
+        extracted_text = response.text.strip()
+        print(f"[DEBUG] Vision APIからの抽出テキスト: {extracted_text}")
         
         # Gemini APIで日本語文章を抽出
-        text = extract_japanese_sentences(raw_text)
+        text = extract_japanese_sentences(extracted_text)
         
         print(f"[DEBUG] 最終的な抽出テキスト: {text}")
         return text
     except Exception as e:
-        print(f"[ERROR] OCRエラー: {e}")
+        print(f"[ERROR] Vision APIエラー: {e}")
         return ""
 
 @timing_decorator
@@ -315,6 +320,6 @@ def get_text():
         return jsonify({'text': latest_text})
 
 if __name__ == '__main__':
-    print("EasyOCRを初期化中... しばらくお待ちください...")
+    print("Vision APIを初期化中... しばらくお待ちください...")
     # Flaskアプリを起動
     app.run(debug=True, host='0.0.0.0', port=int(os.getenv('PORT', 5000))) 
